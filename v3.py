@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 
 data_path = 'F:/university/UCUG1702/water 1/dump-surface.lammpstrj'
+data_path = '/example_data.lammpstrj'
 # data_path = 'F:/university/UCUG1702/water 1/dump-surface-280.lammpstrj'
 # data_path = 'F:/university/UCUG1702/water 1/dump-surface-320.lammpstrj'
 
