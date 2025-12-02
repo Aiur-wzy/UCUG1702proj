@@ -1,10 +1,12 @@
-import mdtraj as mda
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-data_path = 'F:/university/UCUG1702/water 1/dump-surface.lammpstrj'
-data_path = '/example_data.lammpstrj'
+# 数据文件路径（使用仓库中的示例数据）
+data_path = 'data_example.lammpstrj'
 # data_path = 'F:/university/UCUG1702/water 1/dump-surface-280.lammpstrj'
 # data_path = 'F:/university/UCUG1702/water 1/dump-surface-320.lammpstrj'
 
@@ -72,22 +74,27 @@ class H2O:
         return p
 
 
-def calc_1_frame(data_raw: list[str], h2o_num: int, data_start_line: int) -> list[H2O]:
+def calc_1_frame(head: list[str], atom_lines: list[str]) -> list[H2O]:
     """
     解析单个时间帧的数据，将原子坐标组装成水分子对象列表
 
+    读取方式更加健壮：不再假设原子行严格按照 O-H-H 顺序排列，
+    而是根据 atom id 推算分子编号，并检查每个分子是否同时包含1个O和2个H。
+
     参数:
-        data_raw: 当前帧的所有行（header + 原子行）
-        h2o_num: 水分子数量（每个水分子包括3个原子）
-        data_start_line: 当前帧在 data_raw 中的起始行号（一般为0）
+        head: 当前帧的头部 9 行
+        atom_lines: 当前帧的所有原子行
 
     返回:
         当前帧所有水分子的列表（每个元素为 H2O 对象）
     """
     global min_pos, max_pos
 
+    if len(head) < 8:
+        raise ValueError("Frame header is incomplete; expected at least 8 lines")
+
     # 正确的 box 边界位置：TIMESTEP 开头算起的第 5, 6, 7 行
-    box_bounds = data_raw[data_start_line + 5: data_start_line + 8]
+    box_bounds = head[5:8]
     lb = np.array([float(s) for s in box_bounds[0].split()])
     rb = np.array([float(s) for s in box_bounds[2].split()])
 
@@ -102,22 +109,42 @@ def calc_1_frame(data_raw: list[str], h2o_num: int, data_start_line: int) -> lis
     else:
         max_pos = np.maximum(max_pos, rb)
 
-    # 原子坐标起始行：头 9 行之后
-    line_id = data_start_line + 9
-    data: list[H2O] = []
+    if len(atom_lines) % 3 != 0:
+        raise ValueError(f"Atom count {len(atom_lines)} is not divisible by 3; cannot form water molecules")
 
-    def get_pos(line: str, expected_type: int) -> np.ndarray:
+    h2o_num = len(atom_lines) // 3
+    oxygens: list[np.ndarray | None] = [None] * h2o_num
+    hydrogens: list[list[np.ndarray]] = [[] for _ in range(h2o_num)]
+
+    for line in atom_lines:
         parts = line.strip().split()
-        atom_type = int(parts[1])
-        assert atom_type == expected_type, f"Expected type {expected_type}, got {atom_type}"
-        return np.array([float(parts[2]), float(parts[3]), float(parts[4])])
+        if len(parts) < 5:
+            raise ValueError(f"Malformed atom line: {line!r}")
 
-    for _ in range(h2o_num):
-        pO = get_pos(data_raw[line_id], 1)          # 氧原子（类型1）
-        pH1 = get_pos(data_raw[line_id + 1], 2)     # 氢原子1（类型2）
-        pH2 = get_pos(data_raw[line_id + 2], 2)     # 氢原子2（类型2）
-        data.append(H2O(pO, pH1, pH2))              # 加入当前帧
-        line_id += 3                                # 下一个水分子
+        atom_id = int(parts[0])
+        atom_type = int(parts[1])
+        pos = np.array([float(parts[2]), float(parts[3]), float(parts[4])])
+
+        mol_idx = (atom_id - 1) // 3
+        if mol_idx < 0 or mol_idx >= h2o_num:
+            raise ValueError(f"Atom id {atom_id} maps to invalid molecule index {mol_idx}")
+
+        if atom_type == 1:
+            oxygens[mol_idx] = pos
+        elif atom_type == 2:
+            hydrogens[mol_idx].append(pos)
+        else:
+            raise ValueError(f"Unsupported atom type {atom_type}; expected 1 (O) or 2 (H)")
+
+    data: list[H2O] = []
+    for mol_idx in range(h2o_num):
+        pO = oxygens[mol_idx]
+        h_list = hydrogens[mol_idx]
+        if pO is None or len(h_list) != 2:
+            raise ValueError(
+                f"Molecule {mol_idx} is incomplete: O present={pO is not None}, H count={len(h_list)}"
+            )
+        data.append(H2O(pO, h_list[0], h_list[1]))
 
     return data
 
@@ -150,7 +177,6 @@ with open(data_path, "r") as f:
         assert "ITEM: TIMESTEP" in head[0]
 
         natoms = int(head[3])     # 这一帧原子总数
-        h2o_num = natoms // 3     # 水分子数
 
         # 精确逐行读取 natoms 行
         atom_lines = []
@@ -166,7 +192,7 @@ with open(data_path, "r") as f:
             process.close()
             break
 
-        frame_data = calc_1_frame(head + atom_lines, h2o_num, 0)
+        frame_data = calc_1_frame(head, atom_lines)
         frames.append((
             np.array([h2o.pO for h2o in frame_data]),
             np.array([h2o.pH1 for h2o in frame_data]),
@@ -429,7 +455,7 @@ plt.legend()
 plt.title('Dipole angle distribution per layer')
 plt.tight_layout()
 plt.savefig("dipole_angle_per_layer.png", dpi=300)
-plt.show()
+plt.close()
 
 
 # 可选：针对某一层画详细分布图（例如第20层）
@@ -443,7 +469,7 @@ if 0 <= target_layer < layer_num:
     plt.title(f'Dipole angle distribution in layer {target_layer}')
     plt.tight_layout()
     plt.savefig(f"dipole_angle_layer_{target_layer}.png", dpi=300)
-    plt.show()
+    plt.close()
 
 
 # 示例：也可以对倾斜角、平面角做类似的分析和绘图
@@ -465,7 +491,7 @@ plt.title('Tilt angle distribution (selected layers)')
 plt.legend()
 plt.tight_layout()
 plt.savefig("tilt_angle_selected_layers.png", dpi=300)
-plt.show()
+plt.close()
 
 # 对平面法向角进行简单绘制（示例）
 plt.figure(figsize=(8, 6))
@@ -483,7 +509,7 @@ plt.title('Plane normal angle distribution (selected layers)')
 plt.legend()
 plt.tight_layout()
 plt.savefig("plane_angle_selected_layers.png", dpi=300)
-plt.show()
+plt.close()
 
 
 # 若想分别输出每一层（或某几层）的角度分布数据，也可以保存为文件，便于后续处理
@@ -513,7 +539,7 @@ plt.grid(True, alpha=0.3)
 plt.legend(fontsize=8)
 plt.tight_layout()
 plt.savefig("dipole_angle_per_layer_multi.png", dpi=300)
-plt.show()
+plt.close()
 
 
 # 针对每层分别绘制偶极矩角度分布（每层一张子图，可视化层间差异）
@@ -541,4 +567,4 @@ for layer_idx in range(layer_num):
 # 调整子图间距
 plt.tight_layout()
 plt.savefig("dipole_angle_per_layer.png", dpi=300)
-plt.show()
+plt.close()
